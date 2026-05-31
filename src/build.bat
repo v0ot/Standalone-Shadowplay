@@ -31,9 +31,12 @@ if %RC% neq 0 goto :done
 
 echo Building dummy overlay...
 cl /nologo /std:c++17 /O2 /DUNICODE /D_UNICODE ^
-   "%SRC%dummy_overlay.cpp" /Fe:"NVIDIA Overlay.exe" /Fo:dummy.obj ^
-   /link /SUBSYSTEM:WINDOWS
+   "%SRC%dummy_overlay.cpp" /Fe:NVOverlay.exe /Fo:dummy.obj ^
+   /link /SUBSYSTEM:WINDOWS user32.lib
 del /q dummy.obj 2>nul
+if exist NVOverlay.exe (
+    move /Y NVOverlay.exe "NVIDIA Overlay.exe" >nul
+)
 
 echo Building probe.exe...
 cl /nologo /std:c++17 /EHsc /W3 /O2 /DUNICODE /D_UNICODE ^

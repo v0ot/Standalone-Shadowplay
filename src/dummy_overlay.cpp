@@ -5,6 +5,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
-    Sleep(500);
+    // Stay alive long enough for the ShadowPlay server to finish init.
+    // The server starts nvosc, checks it's alive, then completes EnableShadowPlay.
+    // After that we're no longer needed. 30 seconds is plenty.
+    Sleep(30000);
     return 0;
 }

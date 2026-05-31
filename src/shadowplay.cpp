@@ -550,7 +550,25 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     g_nid.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
 
-    // Global hotkeys
+    // Kill the NVIDIA hotkey helper — it steals Alt+F10/F9 before we can register them.
+    // The helper is needed during server init (creates shared memory for settings), but
+    // after the service has been running for a few seconds we can safely kill it.
+    {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe{ sizeof(pe) };
+            for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+                if (_wcsicmp(pe.szExeFile, L"nvsphelper64.exe") == 0) {
+                    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                    if (h) { TerminateProcess(h, 0); CloseHandle(h); Log("Killed nvsphelper64 PID=%u", pe.th32ProcessID); }
+                }
+            }
+            CloseHandle(snap);
+        }
+        Sleep(500);
+    }
+
+    // Global hotkeys (now uncontested)
     RegisterHotKey(g_hwnd, HOTKEY_SAVE_IR,   MOD_ALT | MOD_NOREPEAT, VK_F10);
     RegisterHotKey(g_hwnd, HOTKEY_RECORD,    MOD_ALT | MOD_NOREPEAT, VK_F9);
     RegisterHotKey(g_hwnd, HOTKEY_IR_TOGGLE, MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F10);

@@ -36,7 +36,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ExtractedPath = (Join-Path $PSScriptRoot '..\extracted'),
+    [string]$ExtractedPath = (Join-Path $PSScriptRoot '..\runtime'),
     [switch]$Uninstall
 )
 
@@ -86,7 +86,7 @@ if ($Uninstall) {
 # INSTALL
 # ============================================================
 if (-not (Test-Path (Join-Path $ExtractedPath 'ShadowPlay\nvspapi64.dll'))) {
-    throw "Extracted NVIDIA App payload not found at $ExtractedPath.`nRun: .\extract-installer.ps1 -InstallerPath <NVIDIA_app_vXX.exe>"
+    throw "Runtime binaries not found at $ExtractedPath.`nClone the repo or run: .\extract-installer.ps1 -InstallerPath <NVIDIA_app_vXX.exe>"
 }
 
 Write-Host ""
@@ -105,8 +105,12 @@ if ($svc -and $svc.Status -eq 'Running') {
 # ---- 1. Deploy NvContainer.exe ----
 Write-Host "[1/7] Deploying NvContainer.exe..."
 New-Item -ItemType Directory -Path $NvContainerDir -Force | Out-Null
-Copy-Item (Join-Path $ExtractedPath 'NvContainer\x86_64\NvContainer.exe') "$NvContainerDir\NvContainer.exe" -Force
-Copy-Item (Join-Path $ExtractedPath 'NvContainer\x86_64\NvPluginWatchdog.dll') "$NvContainerDir\NvPluginWatchdog.dll" -Force
+$nvcSrc = Join-Path $ExtractedPath 'NvContainer\NvContainer.exe'
+if (-not (Test-Path $nvcSrc)) { $nvcSrc = Join-Path $ExtractedPath 'NvContainer\x86_64\NvContainer.exe' }
+Copy-Item $nvcSrc "$NvContainerDir\NvContainer.exe" -Force
+$wdSrc = Join-Path $ExtractedPath 'NvContainer\NvPluginWatchdog.dll'
+if (-not (Test-Path $wdSrc)) { $wdSrc = Join-Path $ExtractedPath 'NvContainer\x86_64\NvPluginWatchdog.dll' }
+Copy-Item $wdSrc "$NvContainerDir\NvPluginWatchdog.dll" -Force
 
 # ---- 2. Deploy ShadowPlay DLLs ----
 Write-Host "[2/7] Deploying ShadowPlay runtime..."
@@ -131,7 +135,9 @@ foreach ($dest in $copyMap.Keys) {
 }
 
 foreach ($f in @('MessageBus.dll','NvMessageBus.dll','NvMessageBusBroadcast.dll','messagebus.conf')) {
-    Copy-Item (Join-Path $ExtractedPath "NvApp.MessageBus\$f") (Join-Path $MbDir $f) -Force
+    $src = Join-Path $ExtractedPath "MessageBus\$f"
+    if (-not (Test-Path $src)) { $src = Join-Path $ExtractedPath "NvApp.MessageBus\$f" }
+    if (Test-Path $src) { Copy-Item $src (Join-Path $MbDir $f) -Force }
 }
 
 # ---- 3. Deploy to System32 ----

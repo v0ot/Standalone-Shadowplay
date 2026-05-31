@@ -110,8 +110,65 @@ static bool SpInit() {
     return true;
 }
 
+static bool SpEnable() {
+    if (!g_iface) return false;
+    struct { uint32_t ver; uint32_t f4; uint32_t flags; uint32_t origin; uint64_t pad[4]; } ea = {};
+    ea.ver = SpVersion::EnableDisable;
+    ea.origin = 1; // ServiceRestart
+    HRESULT hr = g_iface->vt->EnableShadowPlay(g_iface, &ea);
+    Log("EnableShadowPlay: 0x%08X", hr);
+    return true; // non-fatal if it fails — CreateCaptureSession might still work
+}
+
 static bool SpCreateSession() {
     if (!g_iface) return false;
+
+    // Enable first — triggers the server to create m_pSPServer
+    SpEnable();
+    Sleep(2000);
+
+    // Push settings via SetCaptureSessionSettings (slot 12)
+    // From IDA: version=0x10100, +8=hSession, +56..+187=settings payload
+    {
+        struct alignas(8) {
+            uint32_t version;        // +0   = 0x10100
+            uint32_t pad4;           // +4
+            uint64_t hSession;       // +8   = 0xFFFFFFFF (all)
+            uint8_t  pad16[40];      // +16..+55
+            // Settings payload starts at +56:
+            uint32_t width;          // +56
+            uint32_t height;         // +60
+            uint32_t fpsNum;         // +64
+            uint32_t fpsDen;         // +68
+            uint32_t bitrate;        // +72  (bps)
+            uint32_t maxBitrate;     // +76
+            uint32_t gopLength;      // +80
+            uint32_t encoderProfile; // +84  (0=Base,1=Main,2=High)
+            uint32_t audioMode;      // +88  (3=all)
+            uint32_t micMode;        // +92
+            uint32_t bufferLenSec;   // +96
+            uint32_t captureMode;    // +100 (1=game, 2=desktop)
+            uint8_t  rest[88];       // +104..+191
+        } ss = {};
+        ss.version        = 0x10100;
+        ss.hSession       = 0xFFFFFFFFull;
+        ss.width          = 1920;
+        ss.height         = 1080;
+        ss.fpsNum         = 60;
+        ss.fpsDen         = 1;
+        ss.bitrate        = 30000000;
+        ss.maxBitrate     = 50000000;
+        ss.gopLength      = 120;
+        ss.encoderProfile = 2;
+        ss.audioMode      = 3;
+        ss.micMode         = 2;
+        ss.bufferLenSec   = 120;
+        ss.captureMode    = 2;
+        HRESULT hr = g_iface->vt->SetCaptureSessionSettings(g_iface, &ss);
+        Log("SetCaptureSessionSettings: 0x%08X", hr);
+    }
+    Sleep(1000);
+
     struct {
         uint32_t version;
         uint32_t field4;
@@ -122,10 +179,18 @@ static bool SpCreateSession() {
         void*    pad28;
     } cs = {};
     cs.version       = 0x10020;
-    cs.sessionType   = 1;   // video capture
-    cs.capController = 3;   // OSCUI (required for IR commands to be accepted)
-    HRESULT hr = g_iface->vt->CreateCaptureSession(g_iface, &cs);
-    if (FAILED(hr)) { Log("CreateCaptureSession failed: 0x%08X", hr); return false; }
+    cs.sessionType   = 1;
+    cs.capController = 3;
+
+    // Retry a few times — server may need a moment after EnableShadowPlay
+    HRESULT hr = E_FAIL;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        hr = g_iface->vt->CreateCaptureSession(g_iface, &cs);
+        if (SUCCEEDED(hr)) break;
+        Log("CreateCaptureSession attempt %d: 0x%08X", attempt + 1, hr);
+        Sleep(2000);
+    }
+    if (FAILED(hr)) { Log("CreateCaptureSession failed after retries: 0x%08X", hr); return false; }
     g_hSession = *reinterpret_cast<uint64_t*>(((char*)&cs) + 8);
     Log("Capture session created: 0x%llX", g_hSession);
     return true;

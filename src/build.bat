@@ -29,6 +29,12 @@ set RC=%ERRORLEVEL%
 del /q shadowplay.obj 2>nul
 if %RC% neq 0 goto :done
 
+echo Building dummy overlay...
+cl /nologo /std:c++17 /O2 /DUNICODE /D_UNICODE ^
+   "%SRC%dummy_overlay.cpp" /Fe:"NVIDIA Overlay.exe" /Fo:dummy.obj ^
+   /link /SUBSYSTEM:WINDOWS
+del /q dummy.obj 2>nul
+
 echo Building probe.exe...
 cl /nologo /std:c++17 /EHsc /W3 /O2 /DUNICODE /D_UNICODE ^
    "%SRC%probe.cpp" /Fe:probe.exe /Fo:probe.obj ^

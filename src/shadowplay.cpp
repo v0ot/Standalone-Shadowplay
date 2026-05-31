@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shlwapi.h>
+#include <tlhelp32.h>
 #include <commctrl.h>
 #include <cstdio>
 #include <cstdint>
@@ -32,8 +33,9 @@ static constexpr UINT IDM_STATUS      = 100;
 static constexpr UINT IDM_SAVE_IR     = 101;
 static constexpr UINT IDM_RECORD      = 102;
 static constexpr UINT IDM_IR_TOGGLE   = 103;
-static constexpr UINT IDM_SETTINGS    = 104;
-static constexpr UINT IDM_QUIT        = 105;
+static constexpr UINT IDM_MIC_TOGGLE  = 104;
+static constexpr UINT IDM_SETTINGS    = 105;
+static constexpr UINT IDM_QUIT        = 106;
 
 // ---- ShadowPlay API state ----
 static HMODULE              g_hApiDll     = nullptr;
@@ -41,6 +43,7 @@ static IShadowPlayApi*      g_iface       = nullptr;
 static uint64_t             g_hSession    = 0;
 static bool                 g_irRunning   = false;
 static bool                 g_recording   = false;
+static bool                 g_micEnabled  = true;
 static NOTIFYICONDATAW      g_nid         = {};
 static HWND                 g_hwnd        = nullptr;
 
@@ -107,6 +110,7 @@ static bool SpInit() {
     HRESULT hr = pCreate(&args);
     if (FAILED(hr) || !g_iface) { Log("CreateShadowPlayApiInterface failed: 0x%08X", hr); return false; }
     Log("ShadowPlay API initialized, iface=%p", g_iface);
+    // g_micEnabled set later after RegReadDword is defined
     return true;
 }
 
@@ -349,6 +353,14 @@ static void RegWriteFloat(const wchar_t* name, float val) {
     }
 }
 
+static void SpToggleMic() {
+    g_micEnabled = !g_micEnabled;
+    RegWriteDword(L"EnableMicrophone", g_micEnabled ? 1 : 0);
+    Log("Microphone %s", g_micEnabled ? "enabled" : "disabled");
+    ShowBalloon(L"ShadowPlay", g_micEnabled ? L"Microphone ON" : L"Microphone OFF");
+    UpdateTip();
+}
+
 static void PushSettingsToServer() {
     if (!g_iface) return;
     // SetCaptureSessionParam(hSession=0xFFFFFFFF, cmd=20) tells the server to re-read registry
@@ -398,7 +410,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Main");
         SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)L"High");
 
-        y += 45;
+        y += 35;
+        mk(L"BUTTON", L"Microphone", BS_AUTOCHECKBOX | WS_TABSTOP, 15, y, 120, 20, 206);
+        CheckDlgButton(hwnd, 206, g_micEnabled ? BST_CHECKED : BST_UNCHECKED);
+
+        y += 30;
         mk(L"BUTTON", L"Save", BS_DEFPUSHBUTTON | WS_TABSTOP, 60, y, 80, 30, IDOK);
         mk(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 155, y, 80, 30, IDCANCEL);
 
@@ -419,6 +435,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             GetDlgItemTextW(hwnd, 203, buf, 64); RegWriteFloat(L"RecordingFPS", (float)_wtof(buf));
             GetDlgItemTextW(hwnd, 204, buf, 64); RegWriteDword(L"DVRBufferLen", _wtoi(buf));
             RegWriteDword(L"EncoderProfile", (uint32_t)SendDlgItemMessageW(hwnd, 205, CB_GETCURSEL, 0, 0));
+            g_micEnabled = IsDlgButtonChecked(hwnd, 206) == BST_CHECKED;
+            RegWriteDword(L"EnableMicrophone", g_micEnabled ? 1 : 0);
             PushSettingsToServer();
             ShowBalloon(L"ShadowPlay", L"Settings saved. Restart IR to apply.");
             DestroyWindow(hwnd);
@@ -449,7 +467,7 @@ static void ShowSettingsDialog() {
     }
 
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-    int ww = 310, wh = 260;
+    int ww = 310, wh = 320;
     g_hSettings = CreateWindowExW(WS_EX_TOOLWINDOW, L"SPSettings", L"ShadowPlay Settings",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         (sw - ww) / 2, (sh - wh) / 2, ww, wh,
@@ -472,6 +490,7 @@ static void ShowContextMenu() {
     AppendMenuW(hMenu, MF_STRING | (g_irRunning ? 0 : MF_GRAYED), IDM_SAVE_IR, L"Save Replay\tAlt+F10");
     AppendMenuW(hMenu, MF_STRING, IDM_RECORD, g_recording ? L"Stop Recording\tAlt+F9" : L"Start Recording\tAlt+F9");
     AppendMenuW(hMenu, MF_STRING, IDM_IR_TOGGLE, g_irRunning ? L"Stop Instant Replay" : L"Start Instant Replay");
+    AppendMenuW(hMenu, MF_STRING | (g_micEnabled ? MF_CHECKED : 0), IDM_MIC_TOGGLE, L"Microphone");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_SETTINGS, L"Settings...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
@@ -502,6 +521,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_SAVE_IR:    SpSaveIR(); break;
         case IDM_RECORD:     if (g_recording) SpStopRecord(); else SpStartRecord(); break;
         case IDM_IR_TOGGLE:  if (g_irRunning) SpStopIR(); else SpStartIR(); break;
+        case IDM_MIC_TOGGLE: SpToggleMic(); break;
         case IDM_SETTINGS:   ShowSettingsDialog(); break;
         case IDM_QUIT:       DestroyWindow(hwnd); break;
         }
@@ -574,6 +594,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     RegisterHotKey(g_hwnd, HOTKEY_IR_TOGGLE, MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F10);
 
     // Init ShadowPlay API
+    g_micEnabled = RegReadDword(L"EnableMicrophone", 1) != 0;
     if (!SpInit()) {
         ShowBalloon(L"ShadowPlay", L"Failed to connect to ShadowPlay. Is the NVIDIA driver installed?", NIIF_ERROR);
     } else if (!SpCreateSession()) {

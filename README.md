@@ -33,7 +33,7 @@ Right-click the tray icon for menu + settings.
 
 ### Steps
 
-1. Clone or download this repo
+1. [**Download ZIP**](https://github.com/v0ot/Standalone-Shadowplay/archive/refs/heads/master.zip) and extract it
 2. Right-click **`install.bat`** → **Run as administrator**
 3. Run **`bin\ShadowPlay.exe`**
 

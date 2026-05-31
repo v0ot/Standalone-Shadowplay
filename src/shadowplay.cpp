@@ -144,7 +144,16 @@ static HRESULT SpSessionControl(uint32_t cmd) {
     ctrl.version     = 0x10058;
     ctrl.hSession    = g_hSession;
     ctrl.eControlCmd = cmd;
-    return g_iface->vt->CaptureSessionControl(g_iface, &ctrl);
+    HRESULT hr = g_iface->vt->CaptureSessionControl(g_iface, &ctrl);
+    if (hr == 0x80070006) { // ERROR_INVALID_HANDLE — session was stolen by overlay
+        Log("Session handle invalid, recreating...");
+        g_hSession = 0;
+        if (SpCreateSession()) {
+            ctrl.hSession = g_hSession;
+            hr = g_iface->vt->CaptureSessionControl(g_iface, &ctrl);
+        }
+    }
+    return hr;
 }
 
 static void SpStartIR() {

@@ -297,106 +297,100 @@ static void PushSettingsToServer() {
     g_iface->vt->SetCaptureSessionParam(g_iface, &pa);
 }
 
-static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+
+static HWND g_hSettings = nullptr;
+
+static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_INITDIALOG: {
-        uint32_t w = RegReadDword(L"VideoWidth", 1920);
-        uint32_t h = RegReadDword(L"VideoHeight", 1080);
-        float fps = RegReadFloat(L"RecordingFPS", 60.0f);
-        uint32_t bufLen = RegReadDword(L"DVRBufferLen", 80);
-        uint32_t enc = RegReadDword(L"EncoderProfile", 2);
+    case WM_CREATE: {
+        HFONT hFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+            0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        auto mk = [&](const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id) {
+            HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style,
+                x, y, w, h, hwnd, (HMENU)(intptr_t)id, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(c, WM_SETFONT, (WPARAM)hFont, TRUE);
+            return c;
+        };
 
-        wchar_t buf[64];
-        swprintf(buf, 64, L"%u", w); SetDlgItemTextW(hDlg, 201, buf);
-        swprintf(buf, 64, L"%u", h); SetDlgItemTextW(hDlg, 202, buf);
-        swprintf(buf, 64, L"%.0f", fps); SetDlgItemTextW(hDlg, 203, buf);
-        swprintf(buf, 64, L"%u", bufLen); SetDlgItemTextW(hDlg, 204, buf);
+        int y = 15;
+        mk(L"STATIC", L"Resolution:", 0, 15, y+3, 80, 20, -1);
+        mk(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_NUMBER, 100, y, 60, 24, 201);
+        mk(L"STATIC", L"x", SS_CENTER, 162, y+3, 16, 20, -1);
+        mk(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_NUMBER, 180, y, 60, 24, 202);
 
-        // Encoder profile: 0=Base, 1=Main, 2=High
-        HWND hCombo = GetDlgItem(hDlg, 205);
+        y += 35;
+        mk(L"STATIC", L"FPS:", 0, 15, y+3, 80, 20, -1);
+        mk(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_NUMBER, 100, y, 60, 24, 203);
+
+        y += 35;
+        mk(L"STATIC", L"Buffer (sec):", 0, 15, y+3, 80, 20, -1);
+        mk(L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_NUMBER, 100, y, 60, 24, 204);
+
+        y += 35;
+        mk(L"STATIC", L"Encoder:", 0, 15, y+3, 80, 20, -1);
+        HWND hCombo = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 100, y, 140, 120, 205);
         SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Base");
         SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Main");
         SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)L"High");
-        SendMessageW(hCombo, CB_SETCURSEL, enc, 0);
-        return TRUE;
+
+        y += 45;
+        mk(L"BUTTON", L"Save", BS_DEFPUSHBUTTON | WS_TABSTOP, 60, y, 80, 30, IDOK);
+        mk(L"BUTTON", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 155, y, 80, 30, IDCANCEL);
+
+        // Populate from registry
+        wchar_t buf[64];
+        swprintf(buf, 64, L"%u", RegReadDword(L"VideoWidth", 1920));  SetDlgItemTextW(hwnd, 201, buf);
+        swprintf(buf, 64, L"%u", RegReadDword(L"VideoHeight", 1080)); SetDlgItemTextW(hwnd, 202, buf);
+        swprintf(buf, 64, L"%.0f", RegReadFloat(L"RecordingFPS", 60.0f)); SetDlgItemTextW(hwnd, 203, buf);
+        swprintf(buf, 64, L"%u", RegReadDword(L"DVRBufferLen", 80));  SetDlgItemTextW(hwnd, 204, buf);
+        SendDlgItemMessageW(hwnd, 205, CB_SETCURSEL, RegReadDword(L"EncoderProfile", 2), 0);
+        return 0;
     }
     case WM_COMMAND:
         if (LOWORD(wp) == IDOK) {
             wchar_t buf[64];
-            GetDlgItemTextW(hDlg, 201, buf, 64); RegWriteDword(L"VideoWidth", _wtoi(buf));
-            GetDlgItemTextW(hDlg, 202, buf, 64); RegWriteDword(L"VideoHeight", _wtoi(buf));
-            GetDlgItemTextW(hDlg, 203, buf, 64); RegWriteFloat(L"RecordingFPS", (float)_wtof(buf));
-            GetDlgItemTextW(hDlg, 204, buf, 64); RegWriteDword(L"DVRBufferLen", _wtoi(buf));
-            uint32_t enc = (uint32_t)SendDlgItemMessageW(hDlg, 205, CB_GETCURSEL, 0, 0);
-            RegWriteDword(L"EncoderProfile", enc);
+            GetDlgItemTextW(hwnd, 201, buf, 64); RegWriteDword(L"VideoWidth", _wtoi(buf));
+            GetDlgItemTextW(hwnd, 202, buf, 64); RegWriteDword(L"VideoHeight", _wtoi(buf));
+            GetDlgItemTextW(hwnd, 203, buf, 64); RegWriteFloat(L"RecordingFPS", (float)_wtof(buf));
+            GetDlgItemTextW(hwnd, 204, buf, 64); RegWriteDword(L"DVRBufferLen", _wtoi(buf));
+            RegWriteDword(L"EncoderProfile", (uint32_t)SendDlgItemMessageW(hwnd, 205, CB_GETCURSEL, 0, 0));
             PushSettingsToServer();
             ShowBalloon(L"ShadowPlay", L"Settings saved. Restart IR to apply.");
-            EndDialog(hDlg, IDOK);
+            DestroyWindow(hwnd);
         } else if (LOWORD(wp) == IDCANCEL) {
-            EndDialog(hDlg, IDCANCEL);
+            DestroyWindow(hwnd);
         }
-        return TRUE;
+        return 0;
+    case WM_DESTROY:
+        g_hSettings = nullptr;
+        return 0;
     }
-    return FALSE;
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 static void ShowSettingsDialog() {
-    // Build dialog template in memory (no .rc file needed = single-file build)
-    alignas(4) BYTE dlgBuf[4096] = {};
-    DLGTEMPLATE* dt = (DLGTEMPLATE*)dlgBuf;
-    dt->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_SETFONT;
-    dt->cdit = 13; // number of controls
-    dt->cx = 220; dt->cy = 165;
+    if (g_hSettings) { SetForegroundWindow(g_hSettings); return; }
 
-    WORD* p = (WORD*)(dt + 1);
-    *p++ = 0; *p++ = 0; // menu, class
-    // title
-    const wchar_t* title = L"ShadowPlay Settings";
-    while (*title) *p++ = *title++;
-    *p++ = 0;
-    // font
-    *p++ = 9; // point size
-    const wchar_t* font = L"Segoe UI";
-    while (*font) *p++ = *font++;
-    *p++ = 0;
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = { sizeof(wc) };
+        wc.lpfnWndProc = SettingsWndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"SPSettings";
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassExW(&wc);
+        registered = true;
+    }
 
-    auto addCtrl = [&](DWORD style, short x, short y, short cx, short cy, WORD id, const wchar_t* cls, const wchar_t* text) {
-        p = (WORD*)(((uintptr_t)p + 3) & ~3); // align to DWORD
-        DLGITEMTEMPLATE* item = (DLGITEMTEMPLATE*)p;
-        item->style = style | WS_CHILD | WS_VISIBLE;
-        item->x = x; item->y = y; item->cx = cx; item->cy = cy;
-        item->id = id;
-        p = (WORD*)(item + 1);
-        while (*cls) *p++ = *cls++;
-        *p++ = 0;
-        while (*text) *p++ = *text++;
-        *p++ = 0;
-        *p++ = 0; // extra data
-    };
-
-    short row = 10;
-    addCtrl(SS_LEFT, 10, row, 60, 10, -1, L"Static", L"Width:");
-    addCtrl(ES_NUMBER | WS_BORDER | WS_TABSTOP, 75, row-2, 50, 14, 201, L"Edit", L"");
-    addCtrl(SS_LEFT, 130, row, 40, 10, -1, L"Static", L"Height:");
-    addCtrl(ES_NUMBER | WS_BORDER | WS_TABSTOP, 170, row-2, 40, 14, 202, L"Edit", L"");
-
-    row += 22;
-    addCtrl(SS_LEFT, 10, row, 60, 10, -1, L"Static", L"FPS:");
-    addCtrl(ES_NUMBER | WS_BORDER | WS_TABSTOP, 75, row-2, 50, 14, 203, L"Edit", L"");
-
-    row += 22;
-    addCtrl(SS_LEFT, 10, row, 60, 10, -1, L"Static", L"Buffer (sec):");
-    addCtrl(ES_NUMBER | WS_BORDER | WS_TABSTOP, 75, row-2, 50, 14, 204, L"Edit", L"");
-
-    row += 22;
-    addCtrl(SS_LEFT, 10, row, 60, 10, -1, L"Static", L"Encoder:");
-    addCtrl(CBS_DROPDOWNLIST | WS_TABSTOP, 75, row-2, 80, 80, 205, L"ComboBox", L"");
-
-    row += 28;
-    addCtrl(BS_DEFPUSHBUTTON | WS_TABSTOP, 60, row, 45, 16, IDOK, L"Button", L"Save");
-    addCtrl(BS_PUSHBUTTON | WS_TABSTOP, 115, row, 45, 16, IDCANCEL, L"Button", L"Cancel");
-
-    DialogBoxIndirectW(GetModuleHandleW(nullptr), dt, g_hwnd, SettingsDlgProc);
+    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    int ww = 310, wh = 260;
+    g_hSettings = CreateWindowExW(WS_EX_TOOLWINDOW, L"SPSettings", L"ShadowPlay Settings",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        (sw - ww) / 2, (sh - wh) / 2, ww, wh,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    ShowWindow(g_hSettings, SW_SHOW);
+    SetForegroundWindow(g_hSettings);
 }
 
 // ---- Tray icon + window ----
@@ -510,10 +504,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     // Message loop — blocks on GetMessage, zero CPU when idle
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!IsDialogMessageW(g_hwnd, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
+        if (g_hSettings && IsDialogMessageW(g_hSettings, &msg))
+            continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
     if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); }

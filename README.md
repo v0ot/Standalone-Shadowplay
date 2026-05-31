@@ -27,9 +27,9 @@ Right-click the tray icon for menu + settings.
 ### Requirements
 
 - NVIDIA GPU
-- NVIDIA display driver installed via [NVCleanstall](https://www.techpowerup.com/download/techpowerup-nvcleanstall/) with **ShadowPlay** checked:
+- NVIDIA display driver installed via [NVCleanstall](https://www.techpowerup.com/download/techpowerup-nvcleanstall/) with **ShadowPlay** + **Virtual Audio** checked:
 
-![NVCleanstall — check only ShadowPlay](docs/nvcleanstall.png)
+![NVCleanstall — check ShadowPlay + Virtual Audio](docs/nvcleanstall.png)
 
 ### Steps
 
@@ -62,6 +62,9 @@ No. That's the whole point.
 
 **Do I need ShadowPlay checked in NVCleanstall?**
 Yes — it installs the driver-level capture infrastructure (nvspcap64.dll, NvContainer service). The overlay and app are replaced by this project.
+
+**Do I need Virtual Audio checked?**
+Yes — required for system audio in clips. Without it, clips will have no audio.
 
 **Does this work with Vanguard / EAC / BattlEye?**
 Yes. The D3D hook (nvspcap64.dll) is NVIDIA-signed and whitelisted by all major anticheats.

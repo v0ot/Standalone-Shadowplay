@@ -20,11 +20,21 @@ set "SRC=%~dp0"
 set "OUT=%SRC%..\bin"
 pushd "%OUT%" || exit /b 1
 
+echo Building ShadowPlay.exe...
+cl /nologo /std:c++17 /EHsc /W3 /O2 /DUNICODE /D_UNICODE ^
+   "%SRC%shadowplay.cpp" /Fe:ShadowPlay.exe /Fo:shadowplay.obj ^
+   /link /SUBSYSTEM:WINDOWS shell32.lib shlwapi.lib user32.lib advapi32.lib comctl32.lib
+
+set RC=%ERRORLEVEL%
+del /q shadowplay.obj 2>nul
+if %RC% neq 0 goto :done
+
+echo Building probe.exe...
 cl /nologo /std:c++17 /EHsc /W3 /O2 /DUNICODE /D_UNICODE ^
    "%SRC%probe.cpp" /Fe:probe.exe /Fo:probe.obj ^
    /link /SUBSYSTEM:CONSOLE shlwapi.lib
-
-set RC=%ERRORLEVEL%
 del /q probe.obj 2>nul
+
+:done
 popd
 exit /b %RC%

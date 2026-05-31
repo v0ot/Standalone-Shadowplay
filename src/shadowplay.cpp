@@ -11,8 +11,6 @@
 #include <shlwapi.h>
 #include <tlhelp32.h>
 #include <commctrl.h>
-#include <mmdeviceapi.h>
-#include <endpointvolume.h>
 #include <cstdio>
 #include <cstdint>
 #include <string>
@@ -355,32 +353,34 @@ static void RegWriteFloat(const wchar_t* name, float val) {
     }
 }
 
+static void SpRestartService() {
+    SpShutdown();
+    g_irRunning = false;
+    g_recording = false;
+    STARTUPINFOW si{ sizeof(si) }; PROCESS_INFORMATION pi{};
+    wchar_t cmd[] = L"net stop NvContainerLocalSystem";
+    CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    Sleep(1000);
+    wchar_t cmd2[] = L"net start NvContainerLocalSystem";
+    CreateProcessW(nullptr, cmd2, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    WaitForSingleObject(pi.hProcess, 10000);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    Sleep(5000);
+    SpInit();
+    SpCreateSession();
+    if (g_hSession) SpStartIR();
+    UpdateTip();
+}
+
 static void SpToggleMic() {
     g_micEnabled = !g_micEnabled;
     RegWriteDword(L"EnableMicrophone", g_micEnabled ? 1 : 0);
     RegWriteDword(L"MicMode", g_micEnabled ? 2 : 0);
     RegWriteDword(L"AudioMode", g_micEnabled ? 3 : 1);
-
-    // Use SetProperty("IsMicrophoneOn", VARIANT_BOOL) to tell the server
-    // From IDA: version=0x100E0, +4=property name (ASCII), +72=VARIANT value
-    if (g_iface) {
-        struct {
-            uint32_t version;           // +0
-            char     name[68];          // +4..+71  (null-terminated ASCII)
-            uint16_t vt;                // +72  VARIANT.vt (VT_BOOL=11)
-            uint16_t pad1, pad2, pad3;  // +74..+79
-            int16_t  boolVal;           // +80  VARIANT_TRUE=-1, VARIANT_FALSE=0
-            uint8_t  rest[48];          // padding
-        } sp = {};
-        sp.version = 0x100E0;
-        strcpy_s(sp.name, "IsMicrophoneOn");
-        sp.vt = 11; // VT_BOOL
-        sp.boolVal = g_micEnabled ? -1 : 0; // VARIANT_TRUE=-1
-        HRESULT hr = g_iface->vt->SetProperty(g_iface, &sp);
-        Log("SetProperty(IsMicrophoneOn=%d): 0x%08X", g_micEnabled, hr);
-    }
-
-    UpdateTip();
+    Log("Microphone %s — restarting service", g_micEnabled ? "ON" : "OFF");
+    SpRestartService();
 }
 
 static void PushSettingsToServer() {
@@ -454,14 +454,19 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             wchar_t buf[64];
             GetDlgItemTextW(hwnd, 201, buf, 64); RegWriteDword(L"VideoWidth", _wtoi(buf));
             GetDlgItemTextW(hwnd, 202, buf, 64); RegWriteDword(L"VideoHeight", _wtoi(buf));
-            GetDlgItemTextW(hwnd, 203, buf, 64); RegWriteFloat(L"RecordingFPS", (float)_wtof(buf));
+            GetDlgItemTextW(hwnd, 203, buf, 64);
+            int fps = _wtoi(buf);
+            if (fps < 1) fps = 30; if (fps > 120) fps = 120;
+            RegWriteFloat(L"RecordingFPS", (float)fps);
             GetDlgItemTextW(hwnd, 204, buf, 64); RegWriteDword(L"DVRBufferLen", _wtoi(buf));
             RegWriteDword(L"EncoderProfile", (uint32_t)SendDlgItemMessageW(hwnd, 205, CB_GETCURSEL, 0, 0));
             g_micEnabled = IsDlgButtonChecked(hwnd, 206) == BST_CHECKED;
             RegWriteDword(L"EnableMicrophone", g_micEnabled ? 1 : 0);
-            PushSettingsToServer();
-            ShowBalloon(L"ShadowPlay", L"Settings saved. Restart IR to apply.");
+            RegWriteDword(L"MicMode", g_micEnabled ? 2 : 0);
+            RegWriteDword(L"AudioMode", g_micEnabled ? 3 : 1);
             DestroyWindow(hwnd);
+            Log("Settings saved — restarting service to apply");
+            SpRestartService();
         } else if (LOWORD(wp) == IDCANCEL) {
             DestroyWindow(hwnd);
         }

@@ -1,0 +1,16 @@
+*.obj
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.log
+extracted/
+analysis/
+setup_log.txt
+run_setup.ps1
+bin/probe.exe
+bin/probe.stdout
+bin/probe_log*
+bin/nvcontainer/

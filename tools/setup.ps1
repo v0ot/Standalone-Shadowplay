@@ -103,7 +103,7 @@ if ($svc -and $svc.Status -eq 'Running') {
 }
 
 # ---- 1. Deploy NvContainer.exe ----
-Write-Host "[1/7] Deploying NvContainer.exe..."
+Write-Host "[1/8] Deploying NvContainer.exe..."
 New-Item -ItemType Directory -Path $NvContainerDir -Force | Out-Null
 $nvcSrc = Join-Path $ExtractedPath 'NvContainer\NvContainer.exe'
 if (-not (Test-Path $nvcSrc)) { $nvcSrc = Join-Path $ExtractedPath 'NvContainer\x86_64\NvContainer.exe' }
@@ -113,7 +113,7 @@ if (-not (Test-Path $wdSrc)) { $wdSrc = Join-Path $ExtractedPath 'NvContainer\x8
 Copy-Item $wdSrc "$NvContainerDir\NvPluginWatchdog.dll" -Force
 
 # ---- 2. Deploy ShadowPlay DLLs ----
-Write-Host "[2/7] Deploying ShadowPlay runtime..."
+Write-Host "[2/8] Deploying ShadowPlay runtime..."
 foreach ($d in @($SpDir, "$SpDir\NVSPCAPS", "$SpDir\Plugins\LocalSystem", $MbDir)) {
     New-Item -ItemType Directory -Path $d -Force | Out-Null
 }
@@ -141,12 +141,33 @@ foreach ($f in @('MessageBus.dll','NvMessageBus.dll','NvMessageBusBroadcast.dll'
 }
 
 # ---- 3. Deploy to System32 ----
-Write-Host "[3/7] Deploying D3D proxies to System32..."
+Write-Host "[3/8] Deploying D3D proxies to System32..."
 Copy-Item (Join-Path $ExtractedPath 'ShadowPlay\nvspcap64.dll') 'C:\Windows\System32\nvspcap64.dll' -Force
 Copy-Item (Join-Path $ExtractedPath 'ShadowPlay\nvspcap.dll') 'C:\Windows\SysWOW64\nvspcap.dll' -Force
 
+# ---- 3b. Install NVIDIA Virtual Audio Driver (for audio capture) ----
+$nvvadInf = Join-Path $ExtractedPath 'NvVAD\nvvad.inf'
+if (Test-Path $nvvadInf) {
+    $nvvadInstalled = Get-PnpDevice -FriendlyName '*NVIDIA Virtual Audio*' -ErrorAction SilentlyContinue
+    if ($nvvadInstalled) {
+        Write-Host "     NVIDIA Virtual Audio already installed, skipping"
+    } else {
+        Write-Host "     Installing NVIDIA Virtual Audio Driver..."
+        $nvvadDir = Join-Path $ExtractedPath 'NvVAD'
+        $result = pnputil.exe /add-driver "$nvvadInf" /install 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "     Virtual Audio Driver installed"
+        } else {
+            Write-Host "     Virtual Audio install returned code $LASTEXITCODE (may need reboot)" -ForegroundColor Yellow
+            Write-Host "     $result"
+        }
+    }
+} else {
+    Write-Host "     NvVAD driver not found in runtime — audio capture will not work" -ForegroundColor Yellow
+}
+
 # ---- 4. Create plugin directory structure with symlinks ----
-Write-Host "[4/7] Creating plugin directories and symlinks..."
+Write-Host "[4/8] Creating plugin directories and symlinks..."
 foreach ($d in @('LocalSystem','SPUser','User','Session','AIUser')) {
     New-Item -ItemType Directory -Path "$PluginBase\$d" -Force | Out-Null
 }
@@ -178,14 +199,14 @@ foreach ($sl in $symlinks) {
 }
 
 # ---- 5. Deploy IpcCommon to LocalAppData ----
-Write-Host "[5/7] Deploying IPC to LocalAppData..."
+Write-Host "[5/8] Deploying IPC to LocalAppData..."
 $localSp = "$env:LOCALAPPDATA\NVIDIA Corporation\NVIDIA App\ShadowPlay"
 New-Item -ItemType Directory -Path $localSp -Force | Out-Null
 Copy-Item "$SpDir\ipccommon64.dll" "$localSp\ipccommon64.dll" -Force
 Copy-Item "$MbDir\messagebus.conf" "$localSp\messagebus.conf" -Force
 
 # ---- 6. Registry ----
-Write-Host "[6/7] Configuring registry..."
+Write-Host "[6/8] Configuring registry..."
 $spKey = 'HKLM:\SOFTWARE\NVIDIA Corporation\Global\NvApp\ShadowPlay'
 $ftsKey = "$spKey\FTS"
 $appKey = 'HKLM:\SOFTWARE\NVIDIA Corporation\Global\NvApp'
@@ -218,7 +239,7 @@ New-Item -ItemType Directory -Path 'C:\ProgramData\NVIDIA Corporation\NVIDIA App
 New-Item -ItemType Directory -Path 'C:\ProgramData\NVIDIA Corporation\NVIDIA App\MessageBus' -Force | Out-Null
 
 # ---- 7. Register + start service ----
-Write-Host "[7/7] Registering NvContainerLocalSystem service..."
+Write-Host "[8/8] Registering NvContainerLocalSystem service..."
 $existingSvc = Get-Service $SvcName -ErrorAction SilentlyContinue
 if ($existingSvc) {
     sc.exe delete $SvcName | Out-Null

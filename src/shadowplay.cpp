@@ -11,6 +11,8 @@
 #include <shlwapi.h>
 #include <tlhelp32.h>
 #include <commctrl.h>
+#include <mmdeviceapi.h>
+#include <endpointvolume.h>
 #include <cstdio>
 #include <cstdint>
 #include <string>
@@ -357,22 +359,27 @@ static void SpToggleMic() {
     g_micEnabled = !g_micEnabled;
     RegWriteDword(L"EnableMicrophone", g_micEnabled ? 1 : 0);
     RegWriteDword(L"MicMode", g_micEnabled ? 2 : 0);
-    // AudioMode: 1=system only, 2=mic only, 3=system+mic
     RegWriteDword(L"AudioMode", g_micEnabled ? 3 : 1);
-    Log("Microphone %s", g_micEnabled ? "enabled" : "disabled");
 
-    // Destroy + recreate session so server picks up new audio config
-    if (g_hSession) {
-        bool wasIR = g_irRunning;
-        if (g_irRunning) { SpSessionControl(4); g_irRunning = false; }
-        struct { uint32_t v; uint32_t p; uint64_t h; uint64_t x[4]; } da = {};
-        da.v = 0x10010; da.h = g_hSession;
-        g_iface->vt->DestroyCaptureSession(g_iface, &da);
-        g_hSession = 0;
-        Sleep(500);
-        SpCreateSession();
-        if (wasIR && g_hSession) SpStartIR();
+    // Use SetProperty("IsMicrophoneOn", VARIANT_BOOL) to tell the server
+    // From IDA: version=0x100E0, +4=property name (ASCII), +72=VARIANT value
+    if (g_iface) {
+        struct {
+            uint32_t version;           // +0
+            char     name[68];          // +4..+71  (null-terminated ASCII)
+            uint16_t vt;                // +72  VARIANT.vt (VT_BOOL=11)
+            uint16_t pad1, pad2, pad3;  // +74..+79
+            int16_t  boolVal;           // +80  VARIANT_TRUE=-1, VARIANT_FALSE=0
+            uint8_t  rest[48];          // padding
+        } sp = {};
+        sp.version = 0x100E0;
+        strcpy_s(sp.name, "IsMicrophoneOn");
+        sp.vt = 11; // VT_BOOL
+        sp.boolVal = g_micEnabled ? -1 : 0; // VARIANT_TRUE=-1
+        HRESULT hr = g_iface->vt->SetProperty(g_iface, &sp);
+        Log("SetProperty(IsMicrophoneOn=%d): 0x%08X", g_micEnabled, hr);
     }
+
     UpdateTip();
 }
 

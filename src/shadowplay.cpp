@@ -356,16 +356,22 @@ static void RegWriteFloat(const wchar_t* name, float val) {
 static void SpToggleMic() {
     g_micEnabled = !g_micEnabled;
     RegWriteDword(L"EnableMicrophone", g_micEnabled ? 1 : 0);
-    // MicMode: 0=off, 1=push-to-talk, 2=always-on
     RegWriteDword(L"MicMode", g_micEnabled ? 2 : 0);
+    // AudioMode: 1=system only, 2=mic only, 3=system+mic
+    RegWriteDword(L"AudioMode", g_micEnabled ? 3 : 1);
     Log("Microphone %s", g_micEnabled ? "enabled" : "disabled");
-    ShowBalloon(L"ShadowPlay", g_micEnabled ? L"Microphone ON" : L"Microphone OFF");
 
-    // Tell the server to re-read mic settings (restart IR to apply)
-    if (g_irRunning) {
-        SpStopIR();
+    // Destroy + recreate session so server picks up new audio config
+    if (g_hSession) {
+        bool wasIR = g_irRunning;
+        if (g_irRunning) { SpSessionControl(4); g_irRunning = false; }
+        struct { uint32_t v; uint32_t p; uint64_t h; uint64_t x[4]; } da = {};
+        da.v = 0x10010; da.h = g_hSession;
+        g_iface->vt->DestroyCaptureSession(g_iface, &da);
+        g_hSession = 0;
         Sleep(500);
-        SpStartIR();
+        SpCreateSession();
+        if (wasIR && g_hSession) SpStartIR();
     }
     UpdateTip();
 }

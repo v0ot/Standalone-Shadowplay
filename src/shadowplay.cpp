@@ -356,8 +356,17 @@ static void RegWriteFloat(const wchar_t* name, float val) {
 static void SpToggleMic() {
     g_micEnabled = !g_micEnabled;
     RegWriteDword(L"EnableMicrophone", g_micEnabled ? 1 : 0);
+    // MicMode: 0=off, 1=push-to-talk, 2=always-on
+    RegWriteDword(L"MicMode", g_micEnabled ? 2 : 0);
     Log("Microphone %s", g_micEnabled ? "enabled" : "disabled");
     ShowBalloon(L"ShadowPlay", g_micEnabled ? L"Microphone ON" : L"Microphone OFF");
+
+    // Tell the server to re-read mic settings (restart IR to apply)
+    if (g_irRunning) {
+        SpStopIR();
+        Sleep(500);
+        SpStartIR();
+    }
     UpdateTip();
 }
 

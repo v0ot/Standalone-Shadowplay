@@ -115,11 +115,20 @@ if not exist "C:\Windows\SysWOW64\nvspcap.dll" (
     copy /Y "%RT%\ShadowPlay\nvspcap.dll" "C:\Windows\SysWOW64\nvspcap.dll" >nul
 )
 
-echo   [5/9] Installing Virtual Audio driver...
+echo   [5/9] Installing audio capture...
+if not exist "C:\Windows\System32\nvaudcap64v.dll" (
+    copy /Y "%RT%\NvVAD\nvaudcap64v.dll" "C:\Windows\System32\nvaudcap64v.dll" >nul
+)
+if not exist "C:\Windows\SysWOW64\nvaudcap32v.dll" (
+    copy /Y "%RT%\NvVAD\nvaudcap32v.dll" "C:\Windows\SysWOW64\nvaudcap32v.dll" >nul
+)
+copy /Y "%RT%\NvVAD\nvaudcap64v.dll" "%APP%\NvVAD\nvaudcap64v.dll" >nul 2>nul
+copy /Y "%RT%\NvVAD\nvaudcap64a.dll" "%APP%\NvVAD\nvaudcap64a.dll" >nul 2>nul
+copy /Y "%RT%\NvVAD\nvaudcap32v.dll" "%APP%\NvVAD\nvaudcap32v.dll" >nul 2>nul
 if exist "%RT%\NvVAD\nvvad.inf" (
     pnputil /add-driver "%RT%\NvVAD\nvvad.inf" /install >nul 2>&1
-    echo        NvVAD driver installed
 )
+echo        Audio capture DLLs deployed
 
 echo   [6/9] Creating plugin directories...
 for %%D in (LocalSystem SPUser User Session AIUser) do (

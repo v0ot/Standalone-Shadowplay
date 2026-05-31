@@ -27,7 +27,9 @@ Right-click the tray icon for menu + settings.
 ### Requirements
 
 - NVIDIA GPU
-- NVIDIA display driver installed via [NVCleanstall](https://www.techpowerup.com/download/techpowerup-nvcleanstall/) with **ShadowPlay** checked
+- NVIDIA display driver installed via [NVCleanstall](https://www.techpowerup.com/download/techpowerup-nvcleanstall/) with **ShadowPlay** checked:
+
+![NVCleanstall — check only ShadowPlay](docs/nvcleanstall.png)
 
 ### Steps
 

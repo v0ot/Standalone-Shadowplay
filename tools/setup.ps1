@@ -1,4 +1,4 @@
-#requires -RunAsAdministrator
+﻿#requires -RunAsAdministrator
 #requires -Version 5.1
 <#
 .SYNOPSIS
@@ -94,13 +94,16 @@ Write-Host "  Standalone ShadowPlay Setup" -ForegroundColor Cyan
 Write-Host "  ===========================" -ForegroundColor Cyan
 Write-Host ""
 
-# Stop existing service if present
-$svc = Get-Service $SvcName -ErrorAction SilentlyContinue
-if ($svc -and $svc.Status -eq 'Running') {
-    Write-Host "Stopping existing $SvcName..."
-    Stop-Service $SvcName -Force
-    Start-Sleep -Seconds 2
+# Kill anything holding our DLLs open
+Write-Host "Stopping NVIDIA processes and services..."
+Stop-Process -Name 'ShadowPlay','NvContainer','nvcontainer','nvsphelper64','NVIDIA Overlay','NVDisplay.Container' -Force -ErrorAction SilentlyContinue
+foreach ($s in @($SvcName, 'NVDisplay.ContainerLocalSystem')) {
+    $sv = Get-Service $s -ErrorAction SilentlyContinue
+    if ($sv -and $sv.Status -eq 'Running') {
+        Stop-Service $s -Force -ErrorAction SilentlyContinue
+    }
 }
+Start-Sleep -Seconds 3
 
 # ---- 1. Deploy NvContainer.exe ----
 Write-Host "[1/8] Deploying NvContainer.exe..."
@@ -140,10 +143,19 @@ foreach ($f in @('MessageBus.dll','NvMessageBus.dll','NvMessageBusBroadcast.dll'
     if (Test-Path $src) { Copy-Item $src (Join-Path $MbDir $f) -Force }
 }
 
-# ---- 3. Deploy to System32 ----
+# ---- 3. Deploy to System32 (skip if already present — D3D apps lock this file) ----
 Write-Host "[3/8] Deploying D3D proxies to System32..."
-Copy-Item (Join-Path $ExtractedPath 'ShadowPlay\nvspcap64.dll') 'C:\Windows\System32\nvspcap64.dll' -Force
-Copy-Item (Join-Path $ExtractedPath 'ShadowPlay\nvspcap.dll') 'C:\Windows\SysWOW64\nvspcap.dll' -Force
+foreach ($pair in @(
+    @{Src='ShadowPlay\nvspcap64.dll'; Dst='C:\Windows\System32\nvspcap64.dll'},
+    @{Src='ShadowPlay\nvspcap.dll';   Dst='C:\Windows\SysWOW64\nvspcap.dll'}
+)) {
+    if (Test-Path $pair.Dst) {
+        Write-Host "     $(Split-Path $pair.Dst -Leaf) already present, skipping"
+    } else {
+        try { Copy-Item (Join-Path $ExtractedPath $pair.Src) $pair.Dst -Force; Write-Host "     $(Split-Path $pair.Dst -Leaf) deployed" }
+        catch { Write-Host "     $(Split-Path $pair.Dst -Leaf) locked — reboot and re-run if needed" -ForegroundColor Yellow }
+    }
+}
 
 # ---- 3b. Install NVIDIA Virtual Audio Driver (for audio capture) ----
 $nvvadInf = Join-Path $ExtractedPath 'NvVAD\nvvad.inf'
@@ -172,14 +184,16 @@ foreach ($d in @('LocalSystem','SPUser','User','Session','AIUser')) {
     New-Item -ItemType Directory -Path "$PluginBase\$d" -Force | Out-Null
 }
 
-# Symlinks (same as what the driver installer creates)
+# Directory symlinks (NvContainer's directory listener only accepts dirs, not file symlinks)
 $symlinks = @(
     @{Link="$PluginBase\LocalSystem\ShadowPlay";           Target="$SpDir\Plugins\LocalSystem"},
     @{Link="$PluginBase\SPUser\nvspcaps";                  Target="$SpDir\NVSPCAPS"},
-    @{Link="$PluginBase\LocalSystem\NvMessageBusBroadcast.dll"; Target="$MbDir\NvMessageBusBroadcast.dll"},
-    @{Link="$PluginBase\LocalSystem\messagebus.conf";      Target="$MbDir\messagebus.conf"},
     @{Link="$PluginBase\LocalSystem\Watchdog";             Target="$NvContainerDir\Watchdog"}
 )
+
+# These must be real file copies, NOT symlinks (NvContainer crashes on file symlinks in plugin dirs)
+Copy-Item "$MbDir\NvMessageBusBroadcast.dll" "$PluginBase\LocalSystem\NvMessageBusBroadcast.dll" -Force
+Copy-Item "$MbDir\messagebus.conf" "$PluginBase\LocalSystem\messagebus.conf" -Force
 
 # Watchdog dir
 New-Item -ItemType Directory -Path "$NvContainerDir\Watchdog" -Force | Out-Null
@@ -268,5 +282,5 @@ if ($status -eq 'Running') {
     Write-Host "  To uninstall: .\setup.ps1 -Uninstall"
 } else {
     Write-Host "  Service failed to start (status: $status)" -ForegroundColor Red
-    Write-Host "  Check: C:\ProgramData\NVIDIA Corporation\NVIDIA App\NvContainer\NvContainerLocalSystem.log"
+    Write-Host '  Check: C:\ProgramData\NVIDIA Corporation\NVIDIA App\NvContainer\NvContainerLocalSystem.log'
 }

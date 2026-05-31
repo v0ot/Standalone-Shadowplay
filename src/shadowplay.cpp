@@ -11,6 +11,8 @@
 #include <shlwapi.h>
 #include <tlhelp32.h>
 #include <commctrl.h>
+#include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <cstdio>
 #include <cstdint>
 #include <string>
@@ -397,6 +399,55 @@ static void PushSettingsToServer() {
 }
 
 
+static void EnumAudioDevices(HWND hCombo, EDataFlow flow) {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    IMMDeviceEnumerator* pEnum = nullptr;
+    CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator), (void**)&pEnum);
+    if (!pEnum) return;
+
+    // Get default device ID
+    IMMDevice* pDefault = nullptr;
+    LPWSTR defaultId = nullptr;
+    if (SUCCEEDED(pEnum->GetDefaultAudioEndpoint(flow, eConsole, &pDefault)) && pDefault) {
+        pDefault->GetId(&defaultId);
+        pDefault->Release();
+    }
+
+    IMMDeviceCollection* pCol = nullptr;
+    if (SUCCEEDED(pEnum->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &pCol)) && pCol) {
+        UINT count = 0;
+        pCol->GetCount(&count);
+        int defaultIdx = 0;
+        for (UINT i = 0; i < count; i++) {
+            IMMDevice* pDev = nullptr;
+            if (SUCCEEDED(pCol->Item(i, &pDev)) && pDev) {
+                IPropertyStore* pProps = nullptr;
+                if (SUCCEEDED(pDev->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
+                    PROPVARIANT name;
+                    PropVariantInit(&name);
+                    if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &name))) {
+                        SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.pwszVal);
+                        LPWSTR devId = nullptr;
+                        pDev->GetId(&devId);
+                        if (defaultId && devId && wcscmp(devId, defaultId) == 0)
+                            defaultIdx = (int)i;
+                        if (devId) CoTaskMemFree(devId);
+                    }
+                    PropVariantClear(&name);
+                    pProps->Release();
+                }
+                pDev->Release();
+            }
+        }
+        SendMessageW(hCombo, CB_SETCURSEL, defaultIdx, 0);
+        pCol->Release();
+    }
+    if (defaultId) CoTaskMemFree(defaultId);
+    pEnum->Release();
+    CoUninitialize();
+}
+
 static HWND g_hSettings = nullptr;
 
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -433,7 +484,17 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)L"High");
 
         y += 35;
-        mk(L"BUTTON", L"Microphone", BS_AUTOCHECKBOX | WS_TABSTOP, 15, y, 120, 20, 206);
+        mk(L"STATIC", L"Output:", 0, 15, y+3, 80, 20, -1);
+        HWND hOut = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 100, y, 190, 200, 207);
+        EnumAudioDevices(hOut, eRender);
+
+        y += 35;
+        mk(L"STATIC", L"Input:", 0, 15, y+3, 80, 20, -1);
+        HWND hIn = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 100, y, 190, 200, 208);
+        EnumAudioDevices(hIn, eCapture);
+
+        y += 35;
+        mk(L"BUTTON", L"Microphone in clips", BS_AUTOCHECKBOX | WS_TABSTOP, 15, y, 150, 20, 206);
         CheckDlgButton(hwnd, 206, g_micEnabled ? BST_CHECKED : BST_UNCHECKED);
 
         y += 30;
@@ -494,7 +555,7 @@ static void ShowSettingsDialog() {
     }
 
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-    int ww = 310, wh = 320;
+    int ww = 320, wh = 430;
     g_hSettings = CreateWindowExW(WS_EX_TOOLWINDOW, L"SPSettings", L"ShadowPlay Settings",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         (sw - ww) / 2, (sh - wh) / 2, ww, wh,

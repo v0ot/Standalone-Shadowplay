@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <vector>
 #include "IShadowPlayApi.h"
 
 #pragma comment(lib, "shell32.lib")
@@ -31,6 +32,12 @@ static constexpr UINT HOTKEY_SAVE_IR  = 1;   // Alt+F10: save instant replay
 static constexpr UINT HOTKEY_RECORD   = 2;   // Alt+F9: toggle manual record
 static constexpr UINT HOTKEY_IR_TOGGLE = 3;  // Alt+Shift+F10: toggle instant replay on/off
 
+static constexpr UINT TIMER_IR_RETRY  = 1;   // periodic auto-resume when capture was blocked
+// CCaptureSession::IsCaptureAllowed returns this when DRM/protected content
+// (Netflix, Spotify, protected YouTube in a browser) is detected on screen.
+// The capture engine refuses to record in that case — by design, not a bug.
+static constexpr HRESULT SP_E_PROTECTED_CONTENT = (HRESULT)0x80040237;
+
 static constexpr UINT IDM_STATUS      = 100;
 static constexpr UINT IDM_SAVE_IR     = 101;
 static constexpr UINT IDM_RECORD      = 102;
@@ -44,10 +51,20 @@ static HMODULE              g_hApiDll     = nullptr;
 static IShadowPlayApi*      g_iface       = nullptr;
 static uint64_t             g_hSession    = 0;
 static bool                 g_irRunning   = false;
+static bool                 g_irDesired   = false;  // user/init wants IR on; drives auto-resume
+static bool                 g_drmNotified = false;  // suppress repeat DRM-blocked balloons
 static bool                 g_recording   = false;
 static bool                 g_micEnabled  = true;
 static NOTIFYICONDATAW      g_nid         = {};
 static HWND                 g_hwnd        = nullptr;
+
+// Concurrency: capture init/restart runs on a worker thread so the tray stays
+// responsive. g_spLock serializes all access to g_iface/g_hSession; g_ready
+// gates user actions until the first session exists; g_restarting prevents
+// overlapping service restarts.
+static CRITICAL_SECTION     g_spLock;
+static volatile LONG        g_ready       = 0;
+static volatile LONG        g_restarting  = 0;
 
 // ---- Helpers ----
 static std::wstring ExeDir() {
@@ -75,7 +92,11 @@ static void ShowBalloon(const wchar_t* title, const wchar_t* msg, DWORD icon = N
 
 static void UpdateTip() {
     const wchar_t* status = L"ShadowPlay: Disconnected";
-    if (g_iface && g_irRunning && g_recording)
+    if (g_restarting)
+        status = L"ShadowPlay: Restarting…";
+    else if (!g_ready)
+        status = L"ShadowPlay: Starting…";
+    else if (g_iface && g_irRunning && g_recording)
         status = L"ShadowPlay: IR Active + Recording";
     else if (g_iface && g_irRunning)
         status = L"ShadowPlay: Instant Replay Active";
@@ -85,6 +106,47 @@ static void UpdateTip() {
         status = L"ShadowPlay: Ready (IR Off)";
     wcsncpy_s(g_nid.szTip, status, _TRUNCATE);
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
+static bool IsProcessRunning(const wchar_t* name) {
+    bool found = false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe{ sizeof(pe) };
+        for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+            if (_wcsicmp(pe.szExeFile, name) == 0) { found = true; break; }
+        }
+        CloseHandle(snap);
+    }
+    return found;
+}
+
+// The capture engine's DVR/Instant-Replay path needs the "NVIDIA GeForce
+// Overlay" window + shared memory to exist before EnableShadowPlay, otherwise
+// StartServer times out (0x800705b4) and IR_START fails (0x80040237). The
+// server is supposed to spawn the overlay itself but does so unreliably, so we
+// ensure our lightweight stub is running first. Idempotent (stub is
+// single-instance), so it's safe to call on every init/restart.
+static void EnsureOverlayRunning() {
+    if (IsProcessRunning(L"NVIDIA Overlay.exe")) return;
+    std::wstring local = ExeDir() + L"\\NVIDIA Overlay.exe";
+    const wchar_t* candidates[] = {
+        L"C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\CEF\\NVIDIA Overlay.exe",
+        local.c_str()
+    };
+    for (const wchar_t* p : candidates) {
+        if (GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES) continue;
+        STARTUPINFOW si{ sizeof(si) }; PROCESS_INFORMATION pi{};
+        std::wstring cmd = p;                       // CreateProcess may write to arg
+        if (CreateProcessW(p, &cmd[0], nullptr, nullptr, FALSE,
+                CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+            Sleep(600); // let it register the window + map the shared memory
+            Log("Launched dummy overlay: %ls", p);
+            return;
+        }
+    }
+    Log("Could not launch dummy overlay (not found)");
 }
 
 // ---- ShadowPlay API wrappers ----
@@ -128,6 +190,10 @@ static bool SpEnable() {
 
 static bool SpCreateSession() {
     if (!g_iface) return false;
+
+    // The overlay window/MMF must exist before EnableShadowPlay or StartServer
+    // times out and Instant Replay can't start.
+    EnsureOverlayRunning();
 
     // Enable first — triggers the server to create m_pSPServer
     SpEnable();
@@ -229,11 +295,23 @@ static HRESULT SpSessionControl(uint32_t cmd) {
 
 static void SpStartIR() {
     if (g_irRunning) return;
+    g_irDesired = true;
     HRESULT hr = SpSessionControl(3); // IR_START
     if (SUCCEEDED(hr)) {
         g_irRunning = true;
+        g_drmNotified = false;
         Log("Instant Replay started");
         ShowBalloon(L"ShadowPlay", L"Instant Replay started");
+    } else if (hr == SP_E_PROTECTED_CONTENT) {
+        // DRM content on screen — the periodic retry timer will auto-resume IR
+        // once it clears. Tell the user once, not every retry.
+        if (!g_drmNotified) {
+            g_drmNotified = true;
+            ShowBalloon(L"ShadowPlay",
+                L"Instant Replay paused: DRM-protected video (Netflix/Spotify/etc.) "
+                L"is on screen. It'll start automatically once that closes.", NIIF_WARNING);
+        }
+        Log("IR_START blocked by protected content (0x80040237)");
     } else {
         Log("IR_START failed: 0x%08X", hr);
         ShowBalloon(L"ShadowPlay", L"Failed to start Instant Replay", NIIF_ERROR);
@@ -242,6 +320,7 @@ static void SpStartIR() {
 }
 
 static void SpStopIR() {
+    g_irDesired = false;
     if (!g_irRunning) return;
     SpSessionControl(4); // IR_STOP
     g_irRunning = false;
@@ -250,9 +329,24 @@ static void SpStopIR() {
     UpdateTip();
 }
 
+// Called from the retry timer (UI thread, under lock) — quietly re-attempt IR
+// when it was previously blocked by DRM/protected content. No balloon spam.
+static void SpTryResumeIR() {
+    if (g_irRunning || !g_irDesired) return;
+    if (SUCCEEDED(SpSessionControl(3))) {
+        g_irRunning = true;
+        g_drmNotified = false;
+        Log("Instant Replay auto-resumed");
+        ShowBalloon(L"ShadowPlay", L"Instant Replay resumed");
+        UpdateTip();
+    }
+}
+
 static void SpSaveIR() {
     if (!g_irRunning) {
-        ShowBalloon(L"ShadowPlay", L"Instant Replay is not active", NIIF_WARNING);
+        ShowBalloon(L"ShadowPlay",
+            g_irDesired ? L"Instant Replay paused (DRM-protected content on screen)"
+                        : L"Instant Replay is not active", NIIF_WARNING);
         return;
     }
     HRESULT hr = SpSessionControl(5); // IR_SAVE
@@ -278,6 +372,10 @@ static void SpStartRecord() {
         g_recording = true;
         Log("Recording started");
         ShowBalloon(L"ShadowPlay", L"Recording started");
+    } else if (hr == SP_E_PROTECTED_CONTENT) {
+        ShowBalloon(L"ShadowPlay",
+            L"Can't record: DRM-protected video (Netflix/Spotify/etc.) is on screen.", NIIF_WARNING);
+        Log("START_MANUAL blocked by protected content (0x80040237)");
     } else {
         Log("START_MANUAL failed: 0x%08X", hr);
         ShowBalloon(L"ShadowPlay", L"Failed to start recording", NIIF_ERROR);
@@ -355,25 +453,67 @@ static void RegWriteFloat(const wchar_t* name, float val) {
     }
 }
 
-static void SpRestartService() {
+// Stop+start the NvContainer service and rebuild the capture session.
+// Must run under g_spLock (touches g_iface/g_hSession). Blocks ~20s, so it is
+// only ever called from a worker thread, never the UI thread.
+static void SpRestartServiceCore() {
     SpShutdown();
     g_irRunning = false;
     g_recording = false;
     STARTUPINFOW si{ sizeof(si) }; PROCESS_INFORMATION pi{};
     wchar_t cmd[] = L"net stop NvContainerLocalSystem";
-    CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-    WaitForSingleObject(pi.hProcess, 5000);
-    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    if (CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 8000);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    }
     Sleep(1000);
     wchar_t cmd2[] = L"net start NvContainerLocalSystem";
-    CreateProcessW(nullptr, cmd2, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-    WaitForSingleObject(pi.hProcess, 10000);
-    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-    Sleep(5000);
+    if (CreateProcessW(nullptr, cmd2, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 12000);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    }
+    Sleep(4000);
     SpInit();
     SpCreateSession();
     if (g_hSession) SpStartIR();
+}
+
+// Worker: first-time capture init. Keeps wWinMain's message loop responsive.
+static DWORD WINAPI InitWorker(LPVOID) {
+    EnterCriticalSection(&g_spLock);
+    bool ok = SpInit() && SpCreateSession();
+    if (ok) SpStartIR();
+    LeaveCriticalSection(&g_spLock);
+    if (ok) {
+        InterlockedExchange(&g_ready, 1);
+    } else if (!g_iface) {
+        ShowBalloon(L"ShadowPlay", L"Failed to connect to ShadowPlay. Is the NVIDIA driver installed?", NIIF_ERROR);
+    } else {
+        ShowBalloon(L"ShadowPlay", L"Failed to create capture session. Is the ShadowPlay service running?", NIIF_ERROR);
+    }
     UpdateTip();
+    return 0;
+}
+
+// Worker: full service restart (settings change / mic toggle).
+static DWORD WINAPI RestartWorker(LPVOID) {
+    if (InterlockedExchange(&g_restarting, 1)) return 0; // already restarting
+    InterlockedExchange(&g_ready, 0);
+    UpdateTip();
+    EnterCriticalSection(&g_spLock);
+    SpRestartServiceCore();
+    LeaveCriticalSection(&g_spLock);
+    InterlockedExchange(&g_ready, g_hSession ? 1 : 0);
+    InterlockedExchange(&g_restarting, 0);
+    ShowBalloon(L"ShadowPlay", L"Settings applied");
+    UpdateTip();
+    return 0;
+}
+
+static void SpAsyncRestart() {
+    ShowBalloon(L"ShadowPlay", L"Applying settings… (a few seconds)");
+    HANDLE h = CreateThread(nullptr, 0, RestartWorker, nullptr, 0, nullptr);
+    if (h) CloseHandle(h);
 }
 
 static void SpToggleMic() {
@@ -382,70 +522,97 @@ static void SpToggleMic() {
     RegWriteDword(L"MicMode", g_micEnabled ? 2 : 0);
     RegWriteDword(L"AudioMode", g_micEnabled ? 3 : 1);
     Log("Microphone %s — restarting service", g_micEnabled ? "ON" : "OFF");
-    SpRestartService();
+    SpAsyncRestart();
 }
 
-static void PushSettingsToServer() {
-    if (!g_iface) return;
-    // SetCaptureSessionParam(hSession=0xFFFFFFFF, cmd=20) tells the server to re-read registry
-    struct { uint32_t ver; uint64_t p[8]; } pa = {};
-    pa.ver = SpVersion::SessionParam;
-    // hSession at +8 = 0xFFFFFFFF (all sessions)
-    *reinterpret_cast<uint64_t*>(((char*)&pa) + 8) = 0xFFFFFFFFull;
-    // cmd at some offset — from the log it's cmd=20
-    // For SetCaptureSessionParam the layout needs more RE; for now the registry
-    // write is sufficient since the server reads on RefreshSettings
-    g_iface->vt->SetCaptureSessionParam(g_iface, &pa);
+// ---- Audio endpoint selection (undocumented IPolicyConfig) ----
+// The capture engine records the Windows *default* render/capture endpoints
+// ("Assigning Default Mic"). To let the user pick a device, we set their choice
+// as the default endpoint — which the engine then honors. Reversible via the
+// normal Windows Sound control panel.
+static const CLSID kCLSID_PolicyConfig =
+    { 0x870af99c, 0x171d, 0x4f9e, { 0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9 } };
+static const IID kIID_PolicyConfig =
+    { 0xf8679f50, 0x850a, 0x41cf, { 0x9c, 0x72, 0x43, 0x0f, 0x29, 0x02, 0x90, 0xc8 } };
+
+struct IPolicyConfig : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetMixFormat(PCWSTR, void**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDeviceFormat(PCWSTR, INT, void**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ResetDeviceFormat(PCWSTR) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDeviceFormat(PCWSTR, void*, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetProcessingPeriod(PCWSTR, INT, void*, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetProcessingPeriod(PCWSTR, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetShareMode(PCWSTR, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetShareMode(PCWSTR, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetPropertyValue(PCWSTR, INT, const PROPERTYKEY&, PROPVARIANT*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetPropertyValue(PCWSTR, INT, const PROPERTYKEY&, PROPVARIANT*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDefaultEndpoint(PCWSTR wszDeviceId, ERole eRole) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetEndpointVisibility(PCWSTR, INT) = 0;
+};
+
+static void SetDefaultAudioEndpoint(const wchar_t* devId) {
+    if (!devId || !*devId) return;
+    IPolicyConfig* pc = nullptr;
+    if (SUCCEEDED(CoCreateInstance(kCLSID_PolicyConfig, nullptr, CLSCTX_ALL,
+            kIID_PolicyConfig, (void**)&pc)) && pc) {
+        pc->SetDefaultEndpoint(devId, eConsole);
+        pc->SetDefaultEndpoint(devId, eMultimedia);
+        pc->SetDefaultEndpoint(devId, eCommunications);
+        pc->Release();
+    }
 }
 
+// Device IDs parallel to the combo entries, captured at dialog-build time so
+// the IDOK handler can map the selected index back to an endpoint ID.
+static std::vector<std::wstring> g_renderIds;
+static std::vector<std::wstring> g_captureIds;
 
-static void EnumAudioDevices(HWND hCombo, EDataFlow flow) {
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+static void EnumAudioDevices(HWND hCombo, EDataFlow flow, std::vector<std::wstring>& ids) {
+    ids.clear();
+    bool comInit = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
     IMMDeviceEnumerator* pEnum = nullptr;
-    CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-        __uuidof(IMMDeviceEnumerator), (void**)&pEnum);
-    if (!pEnum) return;
-
-    // Get default device ID
-    IMMDevice* pDefault = nullptr;
-    LPWSTR defaultId = nullptr;
-    if (SUCCEEDED(pEnum->GetDefaultAudioEndpoint(flow, eConsole, &pDefault)) && pDefault) {
-        pDefault->GetId(&defaultId);
-        pDefault->Release();
-    }
-
-    IMMDeviceCollection* pCol = nullptr;
-    if (SUCCEEDED(pEnum->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &pCol)) && pCol) {
-        UINT count = 0;
-        pCol->GetCount(&count);
-        int defaultIdx = 0;
-        for (UINT i = 0; i < count; i++) {
-            IMMDevice* pDev = nullptr;
-            if (SUCCEEDED(pCol->Item(i, &pDev)) && pDev) {
-                IPropertyStore* pProps = nullptr;
-                if (SUCCEEDED(pDev->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
-                    PROPVARIANT name;
-                    PropVariantInit(&name);
-                    if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &name))) {
-                        SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.pwszVal);
-                        LPWSTR devId = nullptr;
-                        pDev->GetId(&devId);
-                        if (defaultId && devId && wcscmp(devId, defaultId) == 0)
-                            defaultIdx = (int)i;
-                        if (devId) CoTaskMemFree(devId);
-                    }
-                    PropVariantClear(&name);
-                    pProps->Release();
-                }
-                pDev->Release();
-            }
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+            __uuidof(IMMDeviceEnumerator), (void**)&pEnum)) && pEnum) {
+        LPWSTR defaultId = nullptr;
+        IMMDevice* pDefault = nullptr;
+        if (SUCCEEDED(pEnum->GetDefaultAudioEndpoint(flow, eConsole, &pDefault)) && pDefault) {
+            pDefault->GetId(&defaultId);
+            pDefault->Release();
         }
-        SendMessageW(hCombo, CB_SETCURSEL, defaultIdx, 0);
-        pCol->Release();
+        IMMDeviceCollection* pCol = nullptr;
+        if (SUCCEEDED(pEnum->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &pCol)) && pCol) {
+            UINT count = 0;
+            pCol->GetCount(&count);
+            int defaultIdx = 0;
+            for (UINT i = 0; i < count; i++) {
+                IMMDevice* pDev = nullptr;
+                if (SUCCEEDED(pCol->Item(i, &pDev)) && pDev) {
+                    LPWSTR devId = nullptr;
+                    pDev->GetId(&devId);
+                    IPropertyStore* pProps = nullptr;
+                    if (SUCCEEDED(pDev->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
+                        PROPVARIANT name;
+                        PropVariantInit(&name);
+                        if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &name)) && name.pwszVal) {
+                            SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)name.pwszVal);
+                            ids.push_back(devId ? devId : L"");
+                            if (defaultId && devId && wcscmp(devId, defaultId) == 0)
+                                defaultIdx = (int)ids.size() - 1;
+                        }
+                        PropVariantClear(&name);
+                        pProps->Release();
+                    }
+                    if (devId) CoTaskMemFree(devId);
+                    pDev->Release();
+                }
+            }
+            SendMessageW(hCombo, CB_SETCURSEL, defaultIdx, 0);
+            pCol->Release();
+        }
+        if (defaultId) CoTaskMemFree(defaultId);
+        pEnum->Release();
     }
-    if (defaultId) CoTaskMemFree(defaultId);
-    pEnum->Release();
-    CoUninitialize();
+    if (comInit) CoUninitialize();
 }
 
 static HWND g_hSettings = nullptr;
@@ -486,12 +653,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         y += 35;
         mk(L"STATIC", L"Output:", 0, 15, y+3, 80, 20, -1);
         HWND hOut = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 100, y, 190, 200, 207);
-        EnumAudioDevices(hOut, eRender);
+        EnumAudioDevices(hOut, eRender, g_renderIds);
 
         y += 35;
         mk(L"STATIC", L"Input:", 0, 15, y+3, 80, 20, -1);
         HWND hIn = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 100, y, 190, 200, 208);
-        EnumAudioDevices(hIn, eCapture);
+        EnumAudioDevices(hIn, eCapture, g_captureIds);
 
         y += 35;
         mk(L"BUTTON", L"Microphone in clips", BS_AUTOCHECKBOX | WS_TABSTOP, 15, y, 150, 20, 206);
@@ -525,9 +692,21 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             RegWriteDword(L"EnableMicrophone", g_micEnabled ? 1 : 0);
             RegWriteDword(L"MicMode", g_micEnabled ? 2 : 0);
             RegWriteDword(L"AudioMode", g_micEnabled ? 3 : 1);
+
+            // Apply chosen audio devices by making them the Windows default,
+            // which the capture engine then records from.
+            bool comInit = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
+            int oi = (int)SendDlgItemMessageW(hwnd, 207, CB_GETCURSEL, 0, 0);
+            if (oi >= 0 && oi < (int)g_renderIds.size())
+                SetDefaultAudioEndpoint(g_renderIds[oi].c_str());
+            int ii = (int)SendDlgItemMessageW(hwnd, 208, CB_GETCURSEL, 0, 0);
+            if (ii >= 0 && ii < (int)g_captureIds.size())
+                SetDefaultAudioEndpoint(g_captureIds[ii].c_str());
+            if (comInit) CoUninitialize();
+
             DestroyWindow(hwnd);
             Log("Settings saved — restarting service to apply");
-            SpRestartService();
+            SpAsyncRestart();
         } else if (LOWORD(wp) == IDCANCEL) {
             DestroyWindow(hwnd);
         }
@@ -564,6 +743,22 @@ static void ShowSettingsDialog() {
     SetForegroundWindow(g_hSettings);
 }
 
+// Gate a capture action on readiness and take the lock so it can't race the
+// restart worker freeing g_iface. Returns false (with feedback) if not ready.
+static bool SpEnter() {
+    if (!g_ready) {
+        ShowBalloon(L"ShadowPlay",
+            g_restarting ? L"Restarting — one moment…" : L"Still starting up…", NIIF_WARNING);
+        return false;
+    }
+    if (!TryEnterCriticalSection(&g_spLock)) {
+        ShowBalloon(L"ShadowPlay", L"Busy — try again in a moment", NIIF_WARNING);
+        return false;
+    }
+    return true;
+}
+static void SpLeave() { LeaveCriticalSection(&g_spLock); }
+
 // ---- Tray icon + window ----
 static void ShowContextMenu() {
     POINT pt; GetCursorPos(&pt);
@@ -598,17 +793,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ShowSettingsDialog();
         return 0;
 
+    case WM_TIMER:
+        if (wp == TIMER_IR_RETRY && g_ready && g_irDesired && !g_irRunning && !g_restarting) {
+            if (TryEnterCriticalSection(&g_spLock)) {
+                SpTryResumeIR();
+                LeaveCriticalSection(&g_spLock);
+            }
+        }
+        return 0;
+
     case WM_HOTKEY:
-        if (wp == HOTKEY_SAVE_IR)     SpSaveIR();
-        else if (wp == HOTKEY_RECORD) { if (g_recording) SpStopRecord(); else SpStartRecord(); }
-        else if (wp == HOTKEY_IR_TOGGLE) { if (g_irRunning) SpStopIR(); else SpStartIR(); }
+        if (SpEnter()) {
+            if (wp == HOTKEY_SAVE_IR)     SpSaveIR();
+            else if (wp == HOTKEY_RECORD) { if (g_recording) SpStopRecord(); else SpStartRecord(); }
+            else if (wp == HOTKEY_IR_TOGGLE) { if (g_irRunning) SpStopIR(); else SpStartIR(); }
+            SpLeave();
+        }
         return 0;
 
     case WM_COMMAND:
         switch (LOWORD(wp)) {
-        case IDM_SAVE_IR:    SpSaveIR(); break;
-        case IDM_RECORD:     if (g_recording) SpStopRecord(); else SpStartRecord(); break;
-        case IDM_IR_TOGGLE:  if (g_irRunning) SpStopIR(); else SpStartIR(); break;
+        case IDM_SAVE_IR:    if (SpEnter()) { SpSaveIR(); SpLeave(); } break;
+        case IDM_RECORD:     if (SpEnter()) { if (g_recording) SpStopRecord(); else SpStartRecord(); SpLeave(); } break;
+        case IDM_IR_TOGGLE:  if (SpEnter()) { if (g_irRunning) SpStopIR(); else SpStartIR(); SpLeave(); } break;
         case IDM_MIC_TOGGLE: SpToggleMic(); break;
         case IDM_SETTINGS:   ShowSettingsDialog(); break;
         case IDM_QUIT:       DestroyWindow(hwnd); break;
@@ -616,7 +823,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_DESTROY:
+        KillTimer(hwnd, TIMER_IR_RETRY);
+        InterlockedExchange(&g_ready, 0);
+        EnterCriticalSection(&g_spLock);   // wait out any in-flight restart
         SpShutdown();
+        LeaveCriticalSection(&g_spLock);
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         UnregisterHotKey(hwnd, HOTKEY_SAVE_IR);
         UnregisterHotKey(hwnd, HOTKEY_RECORD);
@@ -632,8 +843,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"StandaloneShadowPlay_Mutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr, L"Standalone ShadowPlay is already running.", L"ShadowPlay", MB_OK | MB_ICONINFORMATION);
+        if (hMutex) CloseHandle(hMutex);
         return 0;
     }
+
+    InitializeCriticalSection(&g_spLock);
 
     // Register window class
     WNDCLASSEXW wc = { sizeof(wc) };
@@ -681,17 +895,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     RegisterHotKey(g_hwnd, HOTKEY_RECORD,    MOD_ALT | MOD_NOREPEAT, VK_F9);
     RegisterHotKey(g_hwnd, HOTKEY_IR_TOGGLE, MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F10);
 
-    // Init ShadowPlay API
-    g_micEnabled = RegReadDword(L"EnableMicrophone", 1) != 0;
-    if (!SpInit()) {
-        ShowBalloon(L"ShadowPlay", L"Failed to connect to ShadowPlay. Is the NVIDIA driver installed?", NIIF_ERROR);
-    } else if (!SpCreateSession()) {
-        ShowBalloon(L"ShadowPlay", L"Failed to create capture session. Is the ShadowPlay service running?", NIIF_ERROR);
-    } else {
-        SpStartIR();
-    }
+    // Auto-resume Instant Replay if it gets blocked (DRM content) and later clears.
+    SetTimer(g_hwnd, TIMER_IR_RETRY, 20000, nullptr);
 
+    // Init ShadowPlay API on a worker thread — connecting + creating the capture
+    // session takes several seconds (server warm-up + retries). Doing it here
+    // would freeze the tray; instead the UI loop starts immediately and the
+    // worker flips g_ready when the session is live.
+    g_micEnabled = RegReadDword(L"EnableMicrophone", 1) != 0;
     UpdateTip();
+    {
+        HANDLE h = CreateThread(nullptr, 0, InitWorker, nullptr, 0, nullptr);
+        if (h) CloseHandle(h);
+    }
 
     // Message loop — blocks on GetMessage, zero CPU when idle
     MSG msg;
@@ -702,6 +918,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         DispatchMessageW(&msg);
     }
 
+    DeleteCriticalSection(&g_spLock);
     if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); }
     return 0;
 }

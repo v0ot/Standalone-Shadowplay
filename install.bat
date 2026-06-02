@@ -30,6 +30,10 @@ net stop NvContainerLocalSystem 2>nul
 taskkill /f /im NvContainer.exe 2>nul
 timeout /t 2 /nobreak >nul
 sc delete NvContainerLocalSystem >nul 2>&1
+:: Remove login entry + shortcuts
+reg delete "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v ShadowPlay /f 2>nul
+del "%USERPROFILE%\Desktop\ShadowPlay.lnk" 2>nul
+del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\ShadowPlay.lnk" 2>nul
 rmdir /S /Q "C:\Program Files\NVIDIA Corporation\NvContainer" 2>nul
 rmdir /S /Q "C:\Program Files\NVIDIA Corporation\NVIDIA App" 2>nul
 rmdir /S /Q "%LOCALAPPDATA%\NVIDIA Corporation\NVIDIA App" 2>nul
@@ -216,6 +220,17 @@ sc description %SVC% "Standalone ShadowPlay capture service" >nul
 sc start %SVC% >nul
 timeout /t 5 /nobreak >nul
 
+:: Shortcuts + auto-start at login (so the tray app is always there)
+echo   Creating shortcuts + login entry...
+set "APPEXE=%ROOT%bin\ShadowPlay.exe"
+powershell -NoProfile -Command ^
+    "$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\ShadowPlay.lnk');" ^
+    "$s.TargetPath='%APPEXE%'; $s.WorkingDirectory='%ROOT%bin'; $s.IconLocation='%APPEXE%,0'; $s.Save();" ^
+    "$m=[Environment]::GetFolderPath('StartMenu')+'\Programs\ShadowPlay.lnk';" ^
+    "$s2=(New-Object -ComObject WScript.Shell).CreateShortcut($m);" ^
+    "$s2.TargetPath='%APPEXE%'; $s2.WorkingDirectory='%ROOT%bin'; $s2.IconLocation='%APPEXE%,0'; $s2.Save()" >nul 2>&1
+reg add "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v ShadowPlay /t REG_SZ /d "\"%APPEXE%\"" /f >nul
+
 :: Verify
 sc query %SVC% | findstr "RUNNING" >nul 2>&1
 if %errorlevel% equ 0 (
@@ -224,16 +239,22 @@ if %errorlevel% equ 0 (
     echo    Installation complete!
     echo   ==========================================
     echo.
-    echo   Run:  bin\ShadowPlay.exe
+    echo   ShadowPlay will start with Windows. A desktop
+    echo   shortcut was created, and it's launching now.
     echo.
     echo   Hotkeys:
     echo     Alt+F10        Save instant replay
     echo     Alt+F9         Toggle manual recording
     echo     Alt+Shift+F10  Toggle instant replay
-    echo     Right-click tray icon for menu
+    echo     Right-click tray icon for menu / settings
+    echo.
+    echo   Note: ShadowPlay won't record while DRM video
+    echo   (Netflix/Spotify in a browser) is on screen --
+    echo   it resumes automatically once that closes.
     echo.
     echo   Uninstall:  install.bat /uninstall
     echo.
+    start "" "%APPEXE%"
 ) else (
     echo.
     echo   [!] Service failed to start.

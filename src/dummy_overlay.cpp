@@ -12,6 +12,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
+    // Single-instance guard first: if an overlay stub is already running, exit
+    // so the server relaunching us doesn't stack duplicate windows/mappings.
+    CreateMutexW(nullptr, TRUE, L"NVIDIA_GeForce_Overlay_Stub");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+
     // Create the shared memory the game proxy checks for.
     // Name: {1ABAC973-1361-4C7B-B9CE-6A084DB70189}_v2
     // Size: 4096 bytes (just needs to exist and be mappable)
@@ -30,12 +35,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"NVIDIA GeForce Overlay",
         0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, hInst, nullptr);
+    (void)hwnd;
 
-    // Stay alive while NvContainer needs us (message loop so the window is findable)
+    // Stay alive for the whole session (message-only window, ~0 CPU). A game
+    // launched any time later still finds the window + shared memory, so it
+    // gets its own per-game clip folder. Killed on app/installer uninstall.
     MSG msg;
-    SetTimer(hwnd, 1, 60000, nullptr); // exit after 60s
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (msg.message == WM_TIMER) break;
         DispatchMessageW(&msg);
     }
 

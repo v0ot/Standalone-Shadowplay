@@ -15,3 +15,14 @@ bin/probe.stdout
 bin/probe_log*
 bin/nvcontainer/
 notes/
+
+# RE scratch artifacts (kept locally, not shipped)
+analyze*.py
+*.stdout
+bin/*.dll
+bin/*.exe.manifest
+bin/analyze_*.py
+bin/*_analysis.txt
+bin/*_pass2.txt
+tools/PsExec64.exe
+tools/PsExec*.exe

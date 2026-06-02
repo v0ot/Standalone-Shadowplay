@@ -35,9 +35,9 @@ Right-click the tray icon for menu + settings.
 
 1. [**Download ZIP**](https://github.com/v0ot/Standalone-Shadowplay/archive/refs/heads/master.zip) and extract it
 2. Right-click **`install.bat`** → **Run as administrator**
-3. Run **`bin\ShadowPlay.exe`**
 
-Done.
+That's it. The installer creates a desktop shortcut, sets ShadowPlay to start
+with Windows, and launches it for you.
 
 ### Uninstall
 
@@ -53,6 +53,8 @@ Double-click the tray icon or right-click → Settings:
 - **FPS** — 1–120
 - **Buffer length** — instant replay duration in seconds
 - **Encoder profile** — Base / Main / High
+- **Output / Input device** — pick which speakers/mic to record (defaults to your
+  current Windows devices)
 - **Microphone** — on/off (toggles mic in clips only, stays live for Discord)
 
 ## FAQ
@@ -74,3 +76,13 @@ System audio is captured automatically. Mic can be toggled via the tray menu.
 
 **What about stretch resolution?**
 Handled automatically — NvFBC captures at the GPU output level.
+
+**Instant Replay says it's "paused" / clips won't save?**
+ShadowPlay (by NVIDIA's design) refuses to record while **DRM-protected video**
+is on screen — Netflix, Spotify, or DRM-protected YouTube in a browser. Close
+that tab/app and Instant Replay resumes automatically within ~20 seconds. This
+only affects desktop capture; capturing a focused game is unaffected.
+
+**Does it start automatically?**
+Yes — the installer adds it to Windows startup. Right-click the tray icon → Quit
+to stop it, or run `install.bat /uninstall` to remove startup entirely.
